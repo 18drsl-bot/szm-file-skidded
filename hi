@@ -1,0 +1,605 @@
+-- ═══════════════════════════════════════════════════
+-- COMBINED SCRIPT
+-- Sections: 1) Lighting  2) Baseplate  3) TVM Reanimation GUI  4) Voice Mute Badges  5) Gameplay window (resizable) with a Reanim popup button
+-- Each section runs in its own thread inside pcall, so a failure or a
+-- long wait in one (e.g. the voice section waiting for you to unmute)
+-- never blocks or breaks the others.
+-- ═══════════════════════════════════════════════════
+
+local function run(name, fn)
+    task.spawn(function()
+        local ok, err = pcall(fn)
+        if not ok then
+            warn("[Combined] " .. name .. " failed: " .. tostring(err))
+        end
+    end)
+end
+
+-- Drag-to-resize grip (bottom-right corner) shared by both windows
+local function makeResizable(frame, minW, minH, maxW, maxH)
+    local UIS = game:GetService("UserInputService")
+    local pink = Color3.fromRGB(255, 105, 185)
+
+    local grip = Instance.new("TextButton")
+    grip.Name = "ResizeGrip"
+    grip.Size = UDim2.new(0, 20, 0, 20)
+    grip.Position = UDim2.new(1, -20, 1, -20)
+    grip.BackgroundTransparency = 1
+    grip.Text = ""
+    grip.AutoButtonColor = false
+    grip.ZIndex = 100
+    grip.Parent = frame
+
+    for _, ln in ipairs({ { 11, 16 }, { 14, 8 } }) do
+        local l = Instance.new("Frame")
+        l.AnchorPoint = Vector2.new(0.5, 0.5)
+        l.Position = UDim2.fromOffset(ln[1], ln[1])
+        l.Size = UDim2.fromOffset(ln[2], 2)
+        l.Rotation = -45
+        l.BackgroundColor3 = pink
+        l.BorderSizePixel = 0
+        l.Active = false
+        l.ZIndex = 101
+        l.Parent = grip
+    end
+
+    grip.InputBegan:Connect(function(input)
+        if input.UserInputType ~= Enum.UserInputType.MouseButton1
+            and input.UserInputType ~= Enum.UserInputType.Touch then return end
+        local startMouse = input.Position
+        local startW, startH = frame.AbsoluteSize.X, frame.AbsoluteSize.Y
+        local moveConn, endConn
+        moveConn = UIS.InputChanged:Connect(function(i)
+            if i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch then
+                local d = i.Position - startMouse
+                frame.Size = UDim2.new(0, math.clamp(startW + d.X, minW, maxW), 0, math.clamp(startH + d.Y, minH, maxH))
+            end
+        end)
+        endConn = UIS.InputEnded:Connect(function(i)
+            if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+                moveConn:Disconnect()
+                endConn:Disconnect()
+            end
+        end)
+    end)
+    return grip
+end
+
+-- ═══════════════ HUB (Gameplay window + Reanim popup button) ═══════════════
+local Hub = { pages = {}, cleanups = {} }
+do
+    local CoreGui = game:GetService("CoreGui")
+    local UIS = game:GetService("UserInputService")
+
+    if _G.__HubCleanup then pcall(_G.__HubCleanup) end
+    local oldHub = CoreGui:FindFirstChild("HubPanel")
+    if oldHub then oldHub:Destroy() end
+
+    local PURPLE = Color3.fromRGB(139, 61, 255)
+    local PINK   = Color3.fromRGB(255, 64, 170)
+    local RED    = Color3.fromRGB(255, 59, 92)
+
+    local hubConns = {}
+    local function bind(sig, fn)
+        table.insert(hubConns, sig:Connect(fn))
+    end
+
+    local function corner(p, r)
+        local c = Instance.new("UICorner")
+        c.CornerRadius = UDim.new(0, r)
+        c.Parent = p
+        return c
+    end
+    local function grad(p, rot, seq)
+        local g = Instance.new("UIGradient")
+        g.Color = seq or ColorSequence.new({
+            ColorSequenceKeypoint.new(0, PURPLE),
+            ColorSequenceKeypoint.new(0.5, PINK),
+            ColorSequenceKeypoint.new(1, RED),
+        })
+        g.Rotation = rot or 0
+        g.Parent = p
+        return g
+    end
+
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "HubPanel"
+    gui.ResetOnSpawn = false
+    gui.IgnoreGuiInset = true
+    gui.Parent = CoreGui
+    Hub.gui = gui
+
+    local W, H = 600, 680
+    local main = Instance.new("Frame")
+    main.Size = UDim2.new(0, W, 0, H)
+    main.Position = UDim2.new(0.5, -W / 2, 0.5, -H / 2)
+    main.BackgroundColor3 = Color3.new(1, 1, 1)
+    main.BorderSizePixel = 0
+    main.Parent = gui
+    corner(main, 12)
+    grad(main, 90, ColorSequence.new({
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(20, 9, 36)),
+        ColorSequenceKeypoint.new(0.6, Color3.fromRGB(28, 10, 44)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(40, 10, 40)),
+    }))
+    local mainStroke = Instance.new("UIStroke")
+    mainStroke.Color = Color3.new(1, 1, 1)
+    mainStroke.Thickness = 2
+    mainStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    mainStroke.Parent = main
+    grad(mainStroke, 45)
+
+    makeResizable(main, 460, 420, 1000, 1100)
+
+    local titleBar = Instance.new("Frame")
+    titleBar.Size = UDim2.new(1, 0, 0, 40)
+    titleBar.BackgroundTransparency = 1
+    titleBar.Parent = main
+
+    local titleLbl = Instance.new("TextLabel")
+    titleLbl.Size = UDim2.new(0, 200, 1, 0)
+    titleLbl.Position = UDim2.new(0, 14, 0, 0)
+    titleLbl.BackgroundTransparency = 1
+    titleLbl.Text = "GAMEPLAY"
+    titleLbl.TextColor3 = Color3.new(1, 1, 1)
+    titleLbl.Font = Enum.Font.GothamBold
+    titleLbl.TextSize = 16
+    titleLbl.TextXAlignment = Enum.TextXAlignment.Left
+    titleLbl.Parent = titleBar
+    grad(titleLbl, 0)
+
+    local titleLine = Instance.new("Frame")
+    titleLine.Size = UDim2.new(1, -24, 0, 2)
+    titleLine.Position = UDim2.new(0, 12, 1, -2)
+    titleLine.BackgroundColor3 = Color3.new(1, 1, 1)
+    titleLine.BorderSizePixel = 0
+    titleLine.Parent = titleBar
+    grad(titleLine, 0)
+
+    local closeBtn = Instance.new("TextButton")
+    closeBtn.Size = UDim2.new(0, 24, 0, 24)
+    closeBtn.Position = UDim2.new(1, -36, 0.5, -12)
+    closeBtn.BackgroundColor3 = RED
+    closeBtn.Text = "x"
+    closeBtn.TextColor3 = Color3.new(1, 1, 1)
+    closeBtn.Font = Enum.Font.GothamBold
+    closeBtn.TextSize = 12
+    closeBtn.AutoButtonColor = false
+    closeBtn.Parent = titleBar
+    corner(closeBtn, 12)
+
+    -- Reanim popup button
+    local reBtn = Instance.new("TextButton")
+    reBtn.Size = UDim2.new(0, 100, 0, 26)
+    reBtn.Position = UDim2.new(1, -148, 0.5, -13)
+    reBtn.BackgroundTransparency = 1
+    reBtn.Text = ""
+    reBtn.AutoButtonColor = false
+    reBtn.Parent = titleBar
+    corner(reBtn, 13)
+
+    local reFill = Instance.new("Frame")
+    reFill.Size = UDim2.new(1, 0, 1, 0)
+    reFill.BackgroundColor3 = Color3.new(1, 1, 1)
+    reFill.BorderSizePixel = 0
+    reFill.Active = false
+    reFill.Parent = reBtn
+    corner(reFill, 13)
+    grad(reFill, 0)
+
+    local reLbl = Instance.new("TextLabel")
+    reLbl.Size = UDim2.new(1, 0, 1, 0)
+    reLbl.BackgroundTransparency = 1
+    reLbl.Text = "Reanim"
+    reLbl.TextColor3 = Color3.new(1, 1, 1)
+    reLbl.Font = Enum.Font.GothamBold
+    reLbl.TextSize = 12
+    reLbl.ZIndex = 2
+    reLbl.Active = false
+    reLbl.Parent = reBtn
+
+    reBtn.MouseButton1Click:Connect(function()
+        local g = Hub.reanimGui
+        if g and g.Parent then
+            g.Enabled = not g.Enabled
+        else
+            reLbl.Text = "Loading..."
+            task.delay(1.5, function()
+                if reLbl.Parent then reLbl.Text = "Reanim" end
+            end)
+        end
+    end)
+
+    -- Drag the window by its title bar
+    local dragging, dragStart, startPos = false, nil, nil
+    bind(titleBar.InputBegan, function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = true
+            dragStart = input.Position
+            startPos = main.Position
+        end
+    end)
+    bind(UIS.InputChanged, function(input)
+        if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+            local d = input.Position - dragStart
+            main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+        end
+    end)
+    bind(UIS.InputEnded, function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
+    end)
+    bind(UIS.InputBegan, function(input)
+        if input.KeyCode == Enum.KeyCode.RightShift and not UIS:GetFocusedTextBox() then
+            main.Visible = not main.Visible
+        end
+    end)
+
+    -- Page the Gameplay section builds into
+    local page = Instance.new("Frame")
+    page.Name = "GameplayPage"
+    page.Size = UDim2.new(1, -16, 1, -52)
+    page.Position = UDim2.new(0, 8, 0, 46)
+    page.BackgroundTransparency = 1
+    page.ClipsDescendants = true
+    page.Parent = main
+    Hub.pages.Gameplay = page
+
+    local function closeAll()
+        for _, fn in ipairs(Hub.cleanups) do pcall(fn) end
+        for _, c in ipairs(hubConns) do pcall(function() c:Disconnect() end) end
+        hubConns = {}
+        gui:Destroy()
+        _G.__HubCleanup = nil
+    end
+    _G.__HubCleanup = closeAll
+    closeBtn.MouseButton1Click:Connect(closeAll)
+end
+
+-- ═══════════════ Lighting ═══════════════
+run("Lighting", function()
+local Light = game:GetService("Lighting")
+
+for _, v in pairs(Light:GetChildren()) do
+v:Destroy()
+end
+
+Light.Brightness = 2.25
+Light.ExposureCompensation = 0.12
+Light.ClockTime = 17.4
+Light.Ambient = Color3.fromRGB(155, 95, 230)
+Light.OutdoorAmbient = Color3.fromRGB(135, 75, 210)
+
+local Sky = Instance.new("Sky")
+Sky.SkyboxBk = "http://www.roblox.com/asset/?id=144933338"
+Sky.SkyboxDn = "http://www.roblox.com/asset/?id=144931530"
+Sky.SkyboxFt = "http://www.roblox.com/asset/?id=144933262"
+Sky.SkyboxLf = "http://www.roblox.com/asset/?id=144933244"
+Sky.SkyboxRt = "http://www.roblox.com/asset/?id=144933299"
+Sky.SkyboxUp = "http://www.roblox.com/asset/?id=144931564"
+Sky.StarCount = 2800
+Sky.SunAngularSize = 22
+Sky.SunTextureId = "rbxassetid://102002410058409"
+Sky.Parent = Light
+
+local Bloom = Instance.new("BloomEffect")
+Bloom.Intensity = 0.4
+Bloom.Size = 18
+Bloom.Threshold = 0.68
+Bloom.Parent = Light
+
+local Blur = Instance.new("BlurEffect")
+Blur.Size = 1.5
+Blur.Parent = Light
+
+local ColorC = Instance.new("ColorCorrectionEffect")
+ColorC.Brightness = 0.03
+ColorC.Contrast = 0.14
+ColorC.Saturation = 0.32
+ColorC.TintColor = Color3.fromRGB(165, 85, 255)
+ColorC.Parent = Light
+
+local SunRays = Instance.new("SunRaysEffect")
+SunRays.Intensity = 0.12
+SunRays.Spread = 0.72
+SunRays.Parent = Light
+
+end)
+
+-- ═══════════════ Baseplate ═══════════════
+run("Baseplate", function()
+local Workspace = game:GetService("Workspace")
+
+
+if not game:IsLoaded() then
+	game.Loaded:Wait()
+end
+
+
+local SIZE = 40000
+local THICKNESS = 10
+local PART_SIZE = 2048
+local GRID = math.ceil(SIZE / PART_SIZE)  
+
+
+local DECAL_SIZE = 300
+
+
+local BASE_CFRAME = CFrame.new(8, -10, -482.000031, 1, 0, 0, 0, 1, 0, 0, 0, 1)
+local BASE_POS = BASE_CFRAME.Position
+local BASE_Y = BASE_POS.Y
+local BASE_HEIGHT_OFFSET = THICKNESS / 2
+
+
+local old = Workspace:FindFirstChild("Baseplate")
+if old then
+	old:Destroy()
+end
+
+
+for _, obj in ipairs(Workspace:GetChildren()) do
+	if obj:IsA("BasePart") and (obj.Name:match("^BaseplateSection_") or obj.Name == "CenterDecalPart") then
+		obj:Destroy()
+	end
+end
+
+
+local mapFolder = Workspace:FindFirstChild("Map") or Workspace:FindFirstChild("map")
+if mapFolder then
+	local middleFolder = mapFolder:FindFirstChild("Middle") or mapFolder:FindFirstChild("middle")
+	if middleFolder then
+		for _, child in ipairs(middleFolder:GetChildren()) do
+			child:Destroy()
+		end
+		print("Cleared Workspace.Map.Middle")
+	end
+
+	
+	local extraRoom = mapFolder:FindFirstChild("extra_room")
+	if extraRoom then
+		for _, child in ipairs(extraRoom:GetChildren()) do
+			child:Destroy()
+		end
+		print("Cleared Workspace.map.extra_room")
+	end
+end
+
+
+for x = 0, GRID - 1 do
+	for z = 0, GRID - 1 do
+		local part = Instance.new("Part")
+		part.Name = "BaseplateSection_" .. x .. "_" .. z
+		part.Size = Vector3.new(PART_SIZE, THICKNESS, PART_SIZE)
+
+		local posX = BASE_POS.X + (x * PART_SIZE) - (SIZE / 2) + (PART_SIZE / 2)
+		local posZ = BASE_POS.Z + (z * PART_SIZE) - (SIZE / 2) + (PART_SIZE / 2)
+		local posY = BASE_Y + BASE_HEIGHT_OFFSET
+
+		part.CFrame = CFrame.new(posX, posY, posZ) * BASE_CFRAME.Rotation
+		part.Anchored = true
+		part.CanCollide = true
+		part.Material = Enum.Material.Asphalt
+		part.Color = Color3.new(0, 0, 0)          
+		part.Parent = Workspace
+	end
+end
+
+print("Loaded Baseplate " .. (GRID * GRID) .. " parts")
+
+
+local centerPart = Instance.new("Part")
+centerPart.Name = "CenterDecalPart"
+centerPart.Size = Vector3.new(PART_SIZE, THICKNESS, PART_SIZE)
+centerPart.CFrame = CFrame.new(BASE_POS.X, BASE_Y + BASE_HEIGHT_OFFSET, BASE_POS.Z) * BASE_CFRAME.Rotation
+centerPart.Anchored = true
+centerPart.CanCollide = true
+centerPart.Material = Enum.Material.Asphalt
+centerPart.Color = Color3.new(0, 0, 0)
+centerPart.Parent = Workspace
+
+local surfaceGui = Instance.new("SurfaceGui")
+surfaceGui.Name = "DecalGui"
+surfaceGui.Face = Enum.NormalId.Top
+surfaceGui.SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud
+surfaceGui.PixelsPerStud = 1                  
+surfaceGui.CanvasSize = Vector2.new(PART_SIZE, PART_SIZE)
+surfaceGui.AlwaysOnTop = false
+surfaceGui.Parent = centerPart
+
+local imageLabel = Instance.new("ImageLabel")
+imageLabel.Name = "DecalImage"
+imageLabel.Image = "rbxassetid://102002410058409"
+imageLabel.Size = UDim2.new(0, DECAL_SIZE, 0, DECAL_SIZE)                 
+imageLabel.Position = UDim2.new(0.5, -DECAL_SIZE / 2, 0.5, -DECAL_SIZE / 2) 
+imageLabel.BackgroundTransparency = 1
+imageLabel.Parent = surfaceGui
+
+print("Loaded " .. DECAL_SIZE .. " × " .. DECAL_SIZE .. " studs")
+end)
+
+-- ═══════════════ TVM Reanimation ═══════════════
+run("TVM Reanimation", function()
+local CoreGui = game:GetService("CoreGui")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local HttpService = game:GetService("HttpService")
+local Players = game:GetService("Players")
+
+local player = Players.LocalPlayer
+
+-- ═══════════════════════════════════════════════════
+-- THEME
+-- ═══════════════════════════════════════════════════
+local C = {
+    bg              = Color3.fromRGB(18, 8, 30),
+    bgCard          = Color3.fromRGB(28, 12, 44),
+    surface         = Color3.fromRGB(38, 18, 58),
+    surfaceHover    = Color3.fromRGB(56, 26, 82),
+    surfaceActive   = Color3.fromRGB(78, 34, 110),
+    input           = Color3.fromRGB(46, 22, 68),
+    accent          = Color3.fromRGB(255, 105, 185),
+    accentDim       = Color3.fromRGB(214, 150, 230),
+    text            = Color3.fromRGB(246, 232, 252),
+    textMuted       = Color3.fromRGB(178, 140, 205),
+    textDim         = Color3.fromRGB(120, 85, 150),
+    divider         = Color3.fromRGB(64, 32, 92),
+    border          = Color3.fromRGB(120, 60, 160),
+    borderSoft      = Color3.fromRGB(84, 42, 118),
+    playAccent      = Color3.fromRGB(255, 130, 200),
+}
+
+local function applyCorner(parent, radius)
+    local corner = Instance.new("UICorner", parent)
+    corner.CornerRadius = UDim.new(0, radius or 8)
+    return corner
+end
+
+local function applyStroke(parent, color, thickness, transparency)
+    local stroke = Instance.new("UIStroke", parent)
+    stroke.Color = color or C.borderSoft
+    stroke.Thickness = thickness or 1
+    stroke.Transparency = transparency or 0.5
+    stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    return stroke
+end
+
+if CoreGui:FindFirstChild("TVMReanimationRunner") then
+    CoreGui.TVMReanimationRunner:Destroy()
+end
+
+-- ═══════════════════════════════════════════════════
+-- LOAD MODULE & ANIMATIONS
+-- ═══════════════════════════════════════════════════
+local api
+local success, result = pcall(function()
+    if isfile and isfile("module.lua") then
+        return loadstring(readfile("module.lua"))()
+    end
+    return loadstring(game:HttpGet("https://raw.githubusercontent.com/projectZ678/tvm-reanim/refs/heads/master/module.lua"))()
+end)
+if not (success and type(result) == "table") then
+    warn("TVM Reanimation: Failed to load module.lua")
+    return
+end
+api = result
+
+local function isCustomAnim(a)
+    return a.isCustom or a.category == "Custom"
+end
+
+local function compareAnims(a, b)
+    local aC, bC = isCustomAnim(a), isCustomAnim(b)
+    if aC ~= bC then return not aC end
+    local aCat = a.category or "Reanims"
+    local bCat = b.category or "Reanims"
+    if aCat ~= bCat then return aCat:lower() < bCat:lower() end
+    return a.name:lower() < b.name:lower()
+end
+
+local animations = {}
+local anim_success, anim_data = pcall(function()
+    if isfile and isfile("animations.json") then
+        return readfile("animations.json")
+    end
+    return game:HttpGet("https://raw.githubusercontent.com/projectZ678/tvm-reanim/refs/heads/master/animations.json")
+end)
+if anim_success and type(anim_data) == "string" then
+    if anim_data:sub(1,3) == "\239\187\191" then anim_data = anim_data:sub(4) end
+    local decode_success, decoded = pcall(function() return HttpService:JSONDecode(anim_data) end)
+    if decode_success and type(decoded) == "table" then
+        for _, item in ipairs(decoded) do
+            if item.name and item.path then
+                table.insert(animations, { name = item.name, path = item.path, category = item.category or "Reanims" })
+            end
+        end
+        table.sort(animations, compareAnims)
+    end
+end
+
+-- Config
+local CONFIG_FILE = "TVMReanimConfig.json"
+local savedConfig = {
+    favs = {}, binds = {}, states = {}, speed = 1.0, speedBinds = {},
+    customAnims = {}, hiddenLimbs = {}, favOrder = {}, height = 1.0
+}
+if isfile and readfile and isfile(CONFIG_FILE) then
+    pcall(function()
+        local data = HttpService:JSONDecode(readfile(CONFIG_FILE))
+        if type(data) == "table" then
+            for k,v in pairs(data) do if savedConfig[k] ~= nil then savedConfig[k] = v end end
+        end
+    end)
+end
+
+savedConfig.favOrder = savedConfig.favOrder or {}
+do
+    local validOrder = {}
+    local seen = {}
+    for _, name in ipairs(savedConfig.favOrder) do
+        if savedConfig.favs[name] and not seen[name] then
+            table.insert(validOrder, name)
+            seen[name] = true
+        end
+    end
+    local missing = {}
+    for name, _ in pairs(savedConfig.favs) do
+        if not seen[name] then table.insert(missing, name) end
+    end
+    table.sort(missing, function(a, b) return a:lower() < b:lower() end)
+    for _, name in ipairs(missing) do table.insert(validOrder, name) end
+    savedConfig.favOrder = validOrder
+end
+
+_G.hiddenBodyParts = _G.hiddenBodyParts or {}
+if savedConfig.hiddenLimbs then
+    for limbName, isHidden in pairs(savedConfig.hiddenLimbs) do
+        if isHidden then _G.hiddenBodyParts[limbName] = true end
+    end
+end
+
+if savedConfig.customAnims and #savedConfig.customAnims > 0 then
+    for _, ca in ipairs(savedConfig.customAnims) do
+        table.insert(animations, { name = ca.name, path = ca.script, category = "Custom", isCustom = true })
+    end
+    table.sort(animations, compareAnims)
+end
+
+local function saveConfig()
+    if writefile then
+        pcall(function() writefile(CONFIG_FILE, HttpService:JSONEncode(savedConfig)) end)
+    end
+end
+
+task.spawn(function()
+    task.wait(2)
+    if api and api.preload_animation then
+        for animName, _ in pairs(savedConfig.favs) do
+            for _, a in ipairs(animations) do
+                if a.name == animName then
+                    api.preload_animation(a.path)
+                    task.wait(0.3)
+                    break
+                end
+            end
+        end
+    end
+end)
+
+-- ═══════════════════════════════════════════════════
+-- GUI CONSTRUCTION
+-- ═══════════════════════════════════════════════════
+local currentSpeed = savedConfig.speed or 1.0
+local currentHeight = savedConfig.height or 1.0
+local currentPlayingAnim = nil
+local manualAnimationPlaying = false
+local currentTab = "Reanims"
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "TVMReanimationRunner"
+gui.ResetOnSpawn = false
+gui.Enabled = false          -- opened with the Reanim button on the Gameplay window
+gui.Parent = CoreGui
+Hub.reanimGui = gui
+table.insert(Hub.cleanups, function() gui:Destroy() end)
+
+local GUI_WIDTH = 400
+local GU
